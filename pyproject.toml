@@ -8,15 +8,33 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "fastapi>=0.136.3",
+    "httpx>=0.28.1",
     "kb-core",
+    "paramiko>=5.0.0",
+    "psutil>=7.2.2",
+    "pydantic>=2.13.4",
+    "rich>=15.0.0",
+    "sqlite-utils>=3.39",
+    "typer>=0.26.6",
+    "uvicorn>=0.48.0",
 ]
 
 [project.scripts]
-kb-network-agent = "kb_network:main"
+kb-network = "kb_network:main"
 
 [build-system]
 requires = ["uv_build>=0.9.26,<0.10.0"]
 build-backend = "uv_build"
 
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
 [tool.uv.sources]
 kb-core = { git = "https://github.com/willmo103/kb-core.git" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-mock>=3.15.1",
+]

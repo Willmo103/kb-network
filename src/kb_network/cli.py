@@ -383,7 +383,7 @@ def install():
             if bin_path_str not in paths:
                 paths.append(bin_path_str)
                 new_path_val = ";".join(paths)
-                winreg.SetValueEx(key, "Path", 0, winreg.REG_SZ, new_path_val)
+                winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, new_path_val)
                 HWND_BROADCAST = 0xFFFF
                 WM_SETTINGCHANGE = 0x001A
                 ctypes.windll.user32.SendMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment")

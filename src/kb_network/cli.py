@@ -15,6 +15,7 @@ from rich.table import Table
 import psutil
 
 from kb_core.config import Config
+from kb_core.utils import download_github_release_asset, check_github_latest_release
 from kb_network.db import init_db
 
 app = typer.Typer(help="kb-network Central Server and Management CLI.")
@@ -213,31 +214,270 @@ def run_server_foreground():
 # Desktop Command
 # ----------------------------------------------------
 @app.command()
-def desktop():
+def desktop(
+    dev: bool = typer.Option(
+        False,
+        "--dev",
+        help="Run in development mode (pointing to localhost:3000 instead of built assets)",
+    )
+):
     """Launches the Electron desktop application as a separate background process."""
-    desktop_dir = Path(__file__).resolve().parent.parent.parent / "desktop"
-    if not desktop_dir.exists():
-        console.print("[red]Electron desktop source directory not found.[/red]")
-        raise typer.Exit(1)
+    import shutil
 
-    console.print("Launching desktop client...")
+    package_dir = Path(__file__).resolve().parent
+    src_desktop_dir = package_dir.parent.parent / "desktop"
+
+    if src_desktop_dir.exists() and (src_desktop_dir / "package.json").exists():
+        # Development / Source checkout mode
+        console.print("Launching Electron application in development source mode...")
+        env = os.environ.copy()
+        if dev:
+            env["NODE_ENV"] = "development"
+        else:
+            env["NODE_ENV"] = "production"
+
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = 0x00000008 | 0x08000000
+
+        try:
+            subprocess.Popen(
+                ["npm", "start"],
+                cwd=src_desktop_dir,
+                shell=sys.platform == "win32",
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+                close_fds=True,
+            )
+            return
+        except Exception as e:
+            console.print(f"[red]Error launching Electron via npm start: {e}[/red]")
+            raise typer.Exit(code=1)
+
+    # Installed / Packaged mode
+    # First check if the desktop app is in PATH under the distinct name "kb-network-desktop"
+    exe_name = "kb-network-desktop"
     if sys.platform == "win32":
-        # Launch using npm start, fully detached
-        proc = subprocess.Popen(
-            ["npm", "start"],
-            cwd=str(desktop_dir),
-            shell=True,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-        )
+        exe_name += ".exe"
+
+    path_exe = shutil.which(exe_name)
+    target_exe = None
+
+    if path_exe:
+        target_exe = Path(path_exe)
     else:
-        proc = subprocess.Popen(
-            ["npm", "start"],
-            cwd=str(desktop_dir),
+        # Check standard installation locations or packaged desktop_dist folder
+        base_name = "kb-network.exe" if sys.platform == "win32" else "kb-network"
+        bundled_candidate = package_dir / "desktop_dist" / base_name
+        
+        # User app data local program files location (NSIS)
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
+        install_candidate = None
+        if sys.platform == "win32" and local_app_data:
+            install_candidate = Path(local_app_data) / "Programs" / "kb-network" / "kb-network.exe"
+
+        if bundled_candidate.exists():
+            target_exe = bundled_candidate
+        elif install_candidate and install_candidate.exists():
+            target_exe = install_candidate
+
+    if not target_exe:
+        console.print("Could not find built Electron application executable (kb-network-desktop).")
+        console.print("Attempting to download prebuilt desktop binary from the latest GitHub release...")
+        bin_dir = Path.home() / ".kb" / "bin"
+        dest_name = "kb-network-desktop.exe" if sys.platform == "win32" else "kb-network-desktop"
+        dest_exe = bin_dir / dest_name
+        asset_pattern = r"kb-network.*\.exe" if sys.platform == "win32" else r"kb-network.*"
+        success = download_github_release_asset(
+            repo="Willmo103/kb-network",
+            asset_pattern=asset_pattern,
+            dest_path=dest_exe
+        )
+        if success:
+            target_exe = dest_exe
+            console.print(f"[green]Successfully downloaded latest desktop binary to: {target_exe}[/green]")
+        else:
+            console.print("[red]Error: Could not download prebuilt desktop binary from GitHub Releases.[/red]")
+            console.print("Please run 'kb-network install' first to install the desktop assets.")
+            raise typer.Exit(code=1)
+
+    console.print(f"Launching Electron application: {target_exe}")
+    creationflags = 0
+    if sys.platform == "win32":
+        creationflags = 0x00000008 | 0x08000000
+
+    env = os.environ.copy()
+    env["NODE_ENV"] = "production"
+
+    try:
+        subprocess.Popen(
+            [str(target_exe)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            preexec_fn=os.setpgrp,
+            creationflags=creationflags,
+            close_fds=True,
+            env=env
         )
-    console.print("[green]Desktop process detached.[/green]")
+    except Exception as e:
+        console.print(f"[red]Error executing Electron binary: {e}[/red]")
+        raise typer.Exit(code=1)
+
+
+@app.command(name="install")
+def install():
+    """
+    Perform unified installation of the application:
+    1. Initialize the SQLite database.
+    2. Stage the desktop app binary in the local binary directory.
+    3. Add the local binary directory to the user's system PATH.
+    4. Create a desktop shortcut.
+    """
+    import shutil
+
+    # 1. Run DB migration/initialization
+    init_db()
+    console.print("[green]Database initialized successfully.[/green]")
+
+    # 2. Setup standard binary path ~/.kb/bin
+    bin_dir = Path.home() / ".kb" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+
+    # 3. Locate and copy packaged portable executable
+    package_dir = Path(__file__).resolve().parent
+    base_name = "kb-network.exe" if sys.platform == "win32" else "kb-network"
+    bundled_exe = package_dir / "desktop_dist" / base_name
+    dest_name = "kb-network-desktop.exe" if sys.platform == "win32" else "kb-network-desktop"
+    dest_exe = bin_dir / dest_name
+
+    if bundled_exe.exists():
+        try:
+            shutil.copy2(bundled_exe, dest_exe)
+            console.print(f"[green]Installed Electron desktop binary to: {dest_exe}[/green]")
+        except Exception as e:
+            console.print(f"[red]Failed to copy Electron binary to bin: {e}[/red]")
+    else:
+        console.print("No bundled Electron application binary found to install.")
+        console.print("Downloading the prebuilt desktop binary from the latest GitHub release...")
+        asset_pattern = r"kb-network.*\.exe" if sys.platform == "win32" else r"kb-network.*"
+        success = download_github_release_asset(
+            repo="Willmo103/kb-network",
+            asset_pattern=asset_pattern,
+            dest_path=dest_exe
+        )
+        if success:
+            console.print(f"[green]Successfully downloaded and installed latest desktop binary to: {dest_exe}[/green]")
+        else:
+            console.print("[yellow]Warning: Failed to download prebuilt desktop binary from GitHub Releases.[/yellow]")
+
+    # 4. Add bin directory to PATH
+    if sys.platform == "win32":
+        import winreg
+        import ctypes
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_ALL_ACCESS)
+            path_val, _ = winreg.QueryValueEx(key, "Path")
+            paths = [p.strip() for p in path_val.split(";")]
+            bin_path_str = str(bin_dir)
+            if bin_path_str not in paths:
+                paths.append(bin_path_str)
+                new_path_val = ";".join(paths)
+                winreg.SetValueEx(key, "Path", 0, winreg.REG_SZ, new_path_val)
+                HWND_BROADCAST = 0xFFFF
+                WM_SETTINGCHANGE = 0x001A
+                ctypes.windll.user32.SendMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment")
+                console.print(f"[green]Added {bin_dir} to User PATH.[/green]")
+            else:
+                console.print(f"{bin_dir} is already in PATH.")
+        except Exception as e:
+            console.print(f"[red]Failed to modify Windows PATH registry: {e}[/red]")
+    else:
+        bin_path_str = str(bin_dir)
+        for rc in [".bashrc", ".zshrc", ".profile"]:
+            rc_path = Path.home() / rc
+            if rc_path.exists():
+                try:
+                    content = rc_path.read_text(errors="ignore")
+                    export_line = f'export PATH="$PATH:{bin_path_str}"'
+                    if export_line not in content:
+                        with open(rc_path, "a") as f:
+                            f.write(f"\n{export_line}\n")
+                        console.print(f"[green]Added PATH export to {rc}[/green]")
+                except Exception as e:
+                    console.print(f"[red]Failed to write to {rc}: {e}[/red]")
+
+    # 5. Create desktop shortcut
+    if sys.platform == "win32" and dest_exe.exists():
+        desktop = Path.home() / "Desktop"
+        shortcut_path = desktop / "kb-network.lnk"
+        ps_cmd = f"""
+        $WshShell = New-Object -ComObject WScript.Shell
+        $Shortcut = $WshShell.CreateShortcut('{shortcut_path}')
+        $Shortcut.TargetPath = '{dest_exe}'
+        $Shortcut.WorkingDirectory = '{bin_dir}'
+        $Shortcut.IconLocation = '{dest_exe},0'
+        $Shortcut.Save()
+        """
+        try:
+            subprocess.run(["powershell", "-Command", ps_cmd], check=True, capture_output=True)
+            console.print(f"[green]Created desktop shortcut: {shortcut_path}[/green]")
+        except Exception as e:
+            console.print(f"[red]Failed to create desktop shortcut: {e}[/red]")
+    elif sys.platform != "win32" and dest_exe.exists():
+        desktop = Path.home() / "Desktop"
+        shortcut_path = desktop / "kb-network.desktop"
+        content = f"""[Desktop Entry]
+Name=kb-network
+Exec={dest_exe}
+Type=Application
+Terminal=false
+"""
+        try:
+            shortcut_path.write_text(content)
+            shortcut_path.chmod(0o755)
+            console.print(f"[green]Created desktop shortcut: {shortcut_path}[/green]")
+        except Exception as e:
+            console.print(f"[red]Failed to create desktop shortcut: {e}[/red]")
+
+
+@app.command(name="update")
+def update():
+    """
+    Check the latest GitHub Release and download the updated desktop application if available.
+    """
+    console.print("Checking for updates on GitHub release channel...")
+    release = check_github_latest_release("Willmo103/kb-network")
+    if not release:
+        console.print("[red]Could not check latest release on GitHub.[/red]")
+        raise typer.Exit(code=1)
+
+    tag_name = release.get("tag_name", "unknown")
+    console.print(f"Latest release version: {tag_name}")
+
+    import importlib.metadata
+    try:
+        current_version = "v" + importlib.metadata.version("kb-network")
+    except Exception:
+        current_version = "v0.1.0"
+
+    console.print(f"Current local package version: {current_version}")
+
+    bin_dir = Path.home() / ".kb" / "bin"
+    dest_name = "kb-network-desktop.exe" if sys.platform == "win32" else "kb-network-desktop"
+    dest_exe = bin_dir / dest_name
+
+    console.print(f"Downloading prebuilt desktop binary {tag_name}...")
+    asset_pattern = r"kb-network.*\.exe" if sys.platform == "win32" else r"kb-network.*"
+    success = download_github_release_asset(
+        repo="Willmo103/kb-network",
+        asset_pattern=asset_pattern,
+        dest_path=dest_exe
+    )
+    if success:
+        console.print(f"[green]Successfully updated desktop binary to: {dest_exe}[/green]")
+    else:
+        console.print("[red]Failed to update desktop binary.[/red]")
 
 
 # ----------------------------------------------------

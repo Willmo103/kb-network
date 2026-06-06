@@ -37,7 +37,9 @@
       "dist-frontend/**/*",
       "main.js",
       "preload.js",
-      "package.json"
+      "package.json",
+      "tray-icon.png",
+      "icon.png"
     ],
     "win": {
       "target": [

@@ -52,14 +52,15 @@ def clean_previous_builds():
 
 
 def main():
+    import os
+    import shutil
+
     clean_previous_builds()
+    os.environ["USE_SYSTEM_SIGNCODE"] = "true"
     project_dir = Path(__file__).resolve().parent
     desktop_dir = project_dir / "desktop"
 
-    # 1. Sync project environment
-    run_step(["uv", "sync"], "Synchronizing python environment & dependencies")
-
-    # 2. Build Electron frontend assets
+    # 1. Build & Package React/Electron UI
     if desktop_dir.exists() and (desktop_dir / "package.json").exists():
         run_step(
             ["npm", "install"],
@@ -67,10 +68,35 @@ def main():
             cwd=desktop_dir,
         )
         run_step(
-            ["npm", "run", "build"],
-            "Compiling Vite assets for Electron client",
+            ["npm", "run", "dist"],
+            "Compiling and building Electron standalone package",
             cwd=desktop_dir,
         )
+
+        # 1b. Copy compiled Electron executable to package source
+        dest_dir = project_dir / "src" / "kb_network" / "desktop_dist"
+        if dest_dir.exists():
+            shutil.rmtree(dest_dir)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        
+        desktop_dist = desktop_dir / "dist"
+        candidates = list(desktop_dist.glob("kb-network*.exe")) + \
+                     list(desktop_dist.glob("kb-network*.AppImage")) + \
+                     list(desktop_dist.glob("kb-network*.dmg"))
+        if not candidates:
+            candidates = [p for p in desktop_dist.iterdir() if p.is_file() and p.suffix in ('.exe', '.AppImage', '.dmg')]
+            
+        if candidates:
+            src_exe = candidates[0]
+            ext = src_exe.suffix
+            dest_exe = dest_dir / f"kb-network{ext}"
+            print(f"\nPackaging built Electron executable: {src_exe.name} -> {dest_exe}")
+            shutil.copy2(src_exe, dest_exe)
+        else:
+            print("\n[WARNING] No compiled Electron executable found to package.")
+
+    # 2. Sync python project environment
+    run_step(["uv", "sync"], "Synchronizing python environment & dependencies")
 
     # 3. Run unit tests
     run_step(["uv", "run", "pytest"], "Running pytest suite")
